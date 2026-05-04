@@ -5,6 +5,7 @@
 #include "vector.h"
 #include "config.h"
 
+// Cuda version of first compute the pairwise accelerations.  Effect is on the first argument.
 __device__ void compute_pair(int i, int j, vector3* pos, double* mass, vector3 out) {
     if (i == j) {
         out[0] = out[1] = out[2] = 0;
