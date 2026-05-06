@@ -5,55 +5,56 @@
 #include "config.h"
 
 // Cuda version of first compute the pairwise accelerations.  Effect is on the first argument.
-__device__ void compute_pair(int i, int j, vector3* pos, double* mass, vector3 out) {
-    if (i == j) {
-        out[0] = out[1] = out[2] = 0;
-        return;
-    }
-
-    vector3 distance;
-    for (int k = 0; k < 3; k++)
-        distance[k] = pos[i][k] - pos[j][k];
-
-    double mag_sq =
-        distance[0]*distance[0] +
-        distance[1]*distance[1] +
-        distance[2]*distance[2];
-
-    double mag = sqrt(mag_sq);
-
-    double accelmag = -GRAV_CONSTANT * mass[j] / mag_sq;
-
-    out[0] = accelmag * distance[0] / mag;
-    out[1] = accelmag * distance[1] / mag;
-    out[2] = accelmag * distance[2] / mag;
-}
-
-__global__ void accel_kernel(vector3* pos, double* mass, vector3* accels, int N) {
+__global__ void accel_kernel(vector3* accels, vector3* pos, double* mass, int N) {
     int i = blockIdx.y * blockDim.y + threadIdx.y;
     int j = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (i < N && j < N) {
-        compute_pair(i, j, pos, mass, accels[i*N + j]);
+    if (i >= N || j >= N) return;
+
+    if (i == j) {
+        accels[i * N + j][0] = 0.0;
+        accels[i * N + j][1] = 0.0;
+        accels[i * N + j][2] = 0.0;
+        return;
     }
+
+    double dx = pos[i][0] - pos[j][0];
+    double dy = pos[i][1] - pos[j][1];
+    double dz = pos[i][2] - pos[j][2];
+
+    double dist_sq = dx*dx + dy*dy + dz*dz;
+    double dist = sqrt(dist_sq);
+
+    if (dist_sq == 0.0) return; // incase of overlap
+
+    double accelmag = -GRAV_CONSTANT * mass[j] / dist_sq;
+
+    accels[i * N + j][0] = accelmag * dx / dist;
+    accels[i * N + j][1] = accelmag * dy / dist;
+    accels[i * N + j][2] = accelmag * dz / dist;
 }
 
-__global__ void integrate_kernel(vector3* pos, vector3* vel, vector3* accels, int N) {
+__global__ void integrate_kernel(vector3* accels, vector3* pos, vector3* vel, int N) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    vector3 accel_sum = {0,0,0};
+    double ax = 0.0;
+    double ay = 0.0;
+    double az = 0.0;
 
     for (int j = 0; j < N; j++) {
-        accel_sum[0] += accels[(i*N + j)*3][0];
-        accel_sum[1] += accels[(i*N + j)*3][1];
-        accel_sum[2] += accels[(i*N + j)*3][2];
+        ax += accels[i * N + j][0];
+        ay += accels[i * N + j][1];
+        az += accels[i * N + j][2];
     }
 
-    for (int k = 0; k < 3; k++) {
-        vel[i][k] += accel_sum[k] * INTERVAL;
-        pos[i][k] += vel[i][k] * INTERVAL;
-    }
+    vel[i][0] += ax * INTERVAL;
+    vel[i][1] += ay * INTERVAL;
+    vel[i][2] += az * INTERVAL;
+
+    pos[i][0] += vel[i][0] * INTERVAL;
+    pos[i][1] += vel[i][1] * INTERVAL;
+    pos[i][2] += vel[i][2] * INTERVAL;
 }
 
 void compute() {
@@ -91,11 +92,12 @@ void compute() {
     dim3 block(16,16);
     dim3 grid((N+15)/16, (N+15)/16);
 
-    accel_kernel<<<grid, block>>>(dPos, dMass, dAccels, N);
+    accel_kernel<<<grid, block>>>(dAccels, dPos, dMass, N);
+    cudaDeviceSynchronize();
 
     // Integrate kernel
     int threads = 256;
-    integrate_kernel<<<(N+threads-1)/threads, threads>>>(dPos, dVel, dAccels, N);
+    integrate_kernel<<<(N+threads-1)/threads, threads>>>(dAccels, dPos, dVel, N);
 
     cudaMemcpy(hPosFlat, dPos, vecSize, cudaMemcpyDeviceToHost);
     cudaMemcpy(hVelFlat, dVel, vecSize, cudaMemcpyDeviceToHost);
